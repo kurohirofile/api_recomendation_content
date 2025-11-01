@@ -1,6 +1,5 @@
 const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
-require('dotenv').config();
 
 const options = {
   definition: {
@@ -12,7 +11,7 @@ const options = {
     },
     servers: [
       {
-        url: `http://localhost:${process.env.PORT || 3000}/api`,
+        url: `http://localhost:${process.env.PORT || 3000}`, // <--- hapus /api
       },
     ],
     components: {
