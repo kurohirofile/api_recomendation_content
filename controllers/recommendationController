@@ -1,0 +1,140 @@
+const ratingModel = require('../models/ratingModel');
+const newsModel = require('../models/newsModel');
+const userModel = require('../models/userModel');
+const db = require('../config/db'); // tambahan untuk query langsung kategori saja
+
+function cosineSimilarity(userRatings1, userRatings2) {
+  const commonNews = Object.keys(userRatings1).filter(newsId => newsId in userRatings2);
+  if (commonNews.length === 0) return 0;
+
+  let dotProduct = 0, norm1 = 0, norm2 = 0;
+  for (const newsId of commonNews) {
+    dotProduct += userRatings1[newsId] * userRatings2[newsId];
+  }
+  for (const r of Object.values(userRatings1)) norm1 += r * r;
+  for (const r of Object.values(userRatings2)) norm2 += r * r;
+
+  norm1 = Math.sqrt(norm1);
+  norm2 = Math.sqrt(norm2);
+  if (norm1 === 0 || norm2 === 0) return 0;
+
+  return dotProduct / (norm1 * norm2);
+}
+
+async function getRecommendations(req, res) {
+  try {
+    const userId = req.user.userId;
+    console.log('🔍 User ID:', userId);
+
+    const ratings = await ratingModel.getAllRatings();
+    console.log('🎯 All Ratings:', JSON.stringify(ratings, null, 2));
+
+    const targetUserRatings = ratings[userId] || {};
+    console.log('📊 Target User Ratings:', targetUserRatings);
+
+    const userHobbies = await userModel.getUserHobbies(userId);
+    console.log('🏷️  User Hobbies:', userHobbies);
+
+    // Jika user belum ada rating sama sekali
+    if (Object.keys(targetUserRatings).length === 0) {
+      console.log('⚠️ User belum punya rating, rekomendasi berdasarkan kategori hobi.');
+
+      if (userHobbies.length === 0) {
+        // Jika user juga tidak punya hobby, kembalikan berita terbaru saja
+        const newsRows = await newsModel.findAll();
+        return res.json({ recommendations: newsRows.slice(0, 5) });
+      }
+
+      // Query berita berdasarkan kategori hobi user
+      const placeholders = userHobbies.map(() => '?').join(',');
+      const query = `SELECT * FROM news WHERE category_id IN (${placeholders}) ORDER BY created_at DESC LIMIT 5`;
+      const [newsRows] = await db.query(query, userHobbies);
+
+      console.log('📄 News berdasarkan kategori:', newsRows);
+      return res.json({ recommendations: newsRows });
+    }
+
+    // Hitung similarity dengan user lain
+    const similarities = [];
+    for (const otherUserId in ratings) {
+      if (otherUserId == userId) continue;
+      const sim = cosineSimilarity(targetUserRatings, ratings[otherUserId]);
+      similarities.push({ userId: otherUserId, similarity: sim });
+    }
+    similarities.sort((a, b) => b.similarity - a.similarity);
+    const topUsers = similarities.slice(0, 3);
+
+    console.log('🧑‍🤝‍🧑 Top Similar Users:', topUsers);
+
+    // Skor rekomendasi berdasarkan user mirip
+    const scores = {};
+    const simSums = {};
+    for (const { userId: otherId, similarity } of topUsers) {
+      const otherRatings = ratings[otherId];
+      for (const newsId in otherRatings) {
+        if (newsId in targetUserRatings) continue; // skip yang sudah dirating
+        scores[newsId] = (scores[newsId] || 0) + otherRatings[newsId] * similarity;
+        simSums[newsId] = (simSums[newsId] || 0) + similarity;
+      }
+    }
+
+    console.log('📈 Scores:', scores);
+    console.log('🧮 Similarity Sums:', simSums);
+
+    const rankings = [];
+    for (const newsId in scores) {
+      rankings.push({ newsId: parseInt(newsId), score: scores[newsId] / simSums[newsId] });
+    }
+    rankings.sort((a, b) => b.score - a.score);
+
+    console.log('🏆 Rankings:', rankings);
+
+    if (rankings.length === 0) {
+      console.log('⚠️ Tidak ada rekomendasi yang ditemukan dari rating user lain.');
+
+      // Jika tidak ada rekomendasi berdasarkan rating user lain, fallback ke kategori hobi
+      if (userHobbies.length === 0) {
+        const newsRows = await newsModel.findAll();
+        return res.json({ recommendations: newsRows.slice(0, 5) });
+      }
+
+      const placeholders = userHobbies.map(() => '?').join(',');
+      const query = `SELECT * FROM news WHERE category_id IN (${placeholders}) ORDER BY created_at DESC LIMIT 5`;
+      const [newsRows] = await db.query(query, userHobbies);
+
+      console.log('📄 Fallback news berdasarkan kategori:', newsRows);
+      return res.json({ recommendations: newsRows });
+    }
+
+    const newsIds = rankings.map(r => r.newsId);
+    console.log('📰 News IDs to fetch:', newsIds);
+
+    const newsRows = await newsModel.findByIds(newsIds);
+    console.log('📄 News Rows:', newsRows);
+
+    const newsMap = {};
+    newsRows.forEach(n => { newsMap[n.id] = n; });
+
+    const prioritized = [];
+    const others = [];
+    rankings.forEach(r => {
+      const news = newsMap[r.newsId];
+      if (!news) return;
+      if (userHobbies.includes(news.category_id)) prioritized.push(news);
+      else others.push(news);
+    });
+
+    console.log('🔥 Prioritized News:', prioritized);
+    console.log('📂 Other News:', others);
+
+    const recommendations = [...prioritized, ...others].slice(0, 5);
+    console.log('✅ Final Recommendations:', recommendations);
+
+    res.json({ recommendations });
+  } catch (error) {
+    console.error('❌ Error in getRecommendations:', error);
+    res.status(500).json({ error: 'Terjadi kesalahan server' });
+  }
+}
+
+module.exports = { getRecommendations };
